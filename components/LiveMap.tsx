@@ -10,9 +10,11 @@ type Props = {
   center: LatLng
   path: LatLng[]
   recipient: LatLng
+  onProgress?: (info: { phase: string; progressPct: number | null }) => void
+  messages?: Partial<Record<'pickedUp' | 'atSortation' | 'toHub' | 'atHub' | 'outForDelivery' | 'arriving', string>>
 }
 
-export default function LiveMap({ center, path, recipient }: Props) {
+export default function LiveMap({ center, path, recipient, onProgress, messages }: Props) {
   // WebSocket-provided positions: courier + dynamic nodes
   const { wsPos, recipient: dynamicRecipient, pickup, sortation: dynSortation, delivery } = useCourierWS()
   const effectiveRecipient = dynamicRecipient ? { lat: dynamicRecipient.lat, lng: dynamicRecipient.lng } : recipient
@@ -147,37 +149,117 @@ export default function LiveMap({ center, path, recipient }: Props) {
 
   const [legMsg, setLegMsg] = useState<string | null>(null)
   const [legIcon, setLegIcon] = useState<'warehouse' | 'truck' | 'person' | null>(null)
+  const [legTimestamp, setLegTimestamp] = useState<number | null>(null)
+  const [sinceChangeMs, setSinceChangeMs] = useState<number>(0)
+  const tickRef = useRef<number | null>(null)
   const prevFlagsRef = useRef({ atPickup: false, atSortation: false, atHub: false, arrived: false })
 
   useEffect(() => {
     const prev = prevFlagsRef.current
-    // Initial pickup announcement (only once when we get a dynamic pickup different from default)
-    if (isAtPickup && !prev.atPickup) {
-      setLegMsg('Picked up – parcel in transit')
-      setLegIcon('truck')
+    const localized = {
+      pickedUp: 'Picked up – parcel in transit',
+      atSortation: 'Parcel received at sortation center',
+      toHub: 'On the way to Delivery Hub',
+      atHub: 'Arrived at delivery hub',
+      outForDelivery: 'Out for delivery',
+      arriving: 'Arriving now',
+      ...(messages || {})
     }
-    if (isAtSortation && !prev.atSortation) {
-      setLegMsg('Parcel received at sortation center')
-      setLegIcon('warehouse')
+    const setStatus = (msg: string, icon: typeof legIcon) => {
+      setLegMsg(msg)
+      setLegIcon(icon)
+      setLegTimestamp(Date.now())
+      setSinceChangeMs(0)
     }
-    if (!isAtSortation && prev.atSortation && !isAtHub && !hasArrived) {
-      setLegMsg('On the way to Delivery Hub')
-      setLegIcon('truck')
-    }
-    if (isAtHub && !prev.atHub) {
-      setLegMsg('Arrived at delivery hub')
-      setLegIcon('truck')
-    }
-    if (!isAtHub && prev.atHub && !hasArrived) {
-      setLegMsg('Out for delivery')
-      setLegIcon('truck')
-    }
-    if (hasArrived && !prev.arrived) {
-      setLegMsg('Arriving now')
-      setLegIcon('person')
-    }
+    if (isAtPickup && !prev.atPickup) setStatus(localized.pickedUp, 'truck')
+    if (isAtSortation && !prev.atSortation) setStatus(localized.atSortation, 'warehouse')
+    if (!isAtSortation && prev.atSortation && !isAtHub && !hasArrived) setStatus(localized.toHub, 'truck')
+    if (isAtHub && !prev.atHub) setStatus(localized.atHub, 'truck')
+    if (!isAtHub && prev.atHub && !hasArrived) setStatus(localized.outForDelivery, 'truck')
+    if (hasArrived && !prev.arrived) setStatus(localized.arriving, 'person')
     prevFlagsRef.current = { atPickup: isAtPickup, atSortation: isAtSortation, atHub: isAtHub, arrived: hasArrived }
-  }, [isAtPickup, isAtSortation, isAtHub, hasArrived])
+  }, [isAtPickup, isAtSortation, isAtHub, hasArrived, messages])
+
+  // Elapsed time since last status change
+  useEffect(() => {
+    if (!legTimestamp) return
+    const tick = () => {
+      setSinceChangeMs(Date.now() - legTimestamp)
+      tickRef.current = window.setTimeout(tick, 1000)
+    }
+    tick()
+    return () => { if (tickRef.current) window.clearTimeout(tickRef.current) }
+  }, [legTimestamp])
+
+  // Leg progress percentage
+  const legProgressRaw = useMemo(() => {
+    // Determine current leg start & end
+    if (!courier) return null
+    const legs: { start?: LatLng; end?: LatLng; label: string }[] = [
+      { start: origin, end: sortation, label: 'to-sortation' },
+      { start: sortation, end: hub, label: 'to-hub' },
+      { start: hub, end: effectiveRecipient, label: 'to-recipient' },
+    ]
+    for (const leg of legs) {
+      if (!leg.start || !leg.end) continue
+      const total = haversine(leg.start, leg.end)
+      if (total === 0) continue
+      // If courier is within radius of end, treat as 100%
+      if (haversine(courier, leg.end) <= waypointHitRadius) return { pct: 1, label: leg.label }
+      // Check if courier is between start and end using projection heuristic (sum distances vs total)
+      const distStart = haversine(leg.start, courier)
+      const distEnd = haversine(courier, leg.end)
+      if (distStart < total && distEnd < total && distStart + distEnd <= total * 1.25) {
+        const pct = Math.min(1, Math.max(0, distStart / total))
+        return { pct, label: leg.label }
+      }
+    }
+    return null
+  }, [courier, origin, sortation, hub, effectiveRecipient])
+
+  // Moving average smoothing window
+  const progressWindowRef = useRef<number[]>([])
+  const legProgress = useMemo(() => {
+    if (!legProgressRaw) {
+      progressWindowRef.current = []
+      return null
+    }
+    progressWindowRef.current.push(legProgressRaw.pct)
+    if (progressWindowRef.current.length > 10) progressWindowRef.current.shift()
+    const avg = progressWindowRef.current.reduce((s, v) => s + v, 0) / progressWindowRef.current.length
+    return { pct: avg, label: legProgressRaw.label }
+  }, [legProgressRaw])
+
+  // Emit progress callback
+  useEffect(() => {
+    if (onProgress) {
+      onProgress({ phase: legProgress?.label || (hasArrived ? 'recipient' : 'unknown'), progressPct: legProgress ? legProgress.pct : null })
+    }
+  }, [legProgress, onProgress, hasArrived])
+
+  const prettyTimestamp = useMemo(() => {
+    if (!legTimestamp) return ''
+    const d = new Date(legTimestamp)
+    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+  }, [legTimestamp])
+
+  const elapsedPretty = useMemo(() => {
+    if (!legTimestamp) return ''
+    const totalSec = Math.floor(sinceChangeMs / 1000)
+    const m = Math.floor(totalSec / 60)
+    const s = totalSec % 60
+    return `(+${m}m${s.toString().padStart(2,'0')}s)`
+  }, [sinceChangeMs, legTimestamp])
+
+  const phaseColor = useMemo(() => {
+    if (!legMsg) return 'bg-slate-800/95'
+    if (legMsg.includes('sortation')) return 'bg-indigo-700/95'
+    if (legMsg.includes('Delivery Hub')) return 'bg-blue-700/95'
+    if (legMsg.includes('Out for delivery')) return 'bg-amber-600/95'
+    if (legMsg.includes('Arriving now')) return 'bg-emerald-700/95'
+    if (legMsg.includes('Picked up')) return 'bg-sky-700/95'
+    return 'bg-slate-800/95'
+  }, [legMsg])
 
   return (
     <div className="relative h-full w-full">
@@ -191,26 +273,23 @@ export default function LiveMap({ center, path, recipient }: Props) {
       />
       {legMsg && (
         <div className="pointer-events-none absolute left-0 right-0 top-0 z-10" role="status" aria-live="polite">
-          <div className="mx-auto max-w-xl rounded-b-lg bg-slate-800/95 px-4 py-2 text-sm font-semibold text-slate-100 shadow-lg">
-            <div className="flex items-center gap-2">
+          <div className={`mx-auto max-w-xl rounded-b-lg ${phaseColor} px-4 py-2 text-sm font-semibold text-slate-100 shadow-lg transition-colors`}>
+            <div className="flex items-center gap-2 flex-wrap">
               {legIcon === 'warehouse' && <WarehouseIcon />}
               {legIcon === 'truck' && <TruckIcon />}
               {legIcon === 'person' && <PersonIcon />}
               <span>{legMsg}</span>
+              {prettyTimestamp && <span className="text-xs font-normal text-slate-200">@ {prettyTimestamp}</span>}
+              {elapsedPretty && <span className="text-xs font-medium text-slate-300">{elapsedPretty}</span>}
+              {legProgress && (
+                <span className="ml-auto text-xs font-medium tracking-wide text-slate-300">
+                  {legProgress.label.replace('to-','')}: {(legProgress.pct * 100).toFixed(0)}%
+                </span>
+              )}
             </div>
           </div>
         </div>
       )}
-      {(isNearby || hasArrived) && (
-        <div
-          className={`pointer-events-none absolute top-3 right-3 z-10 rounded-lg px-4 py-2 text-sm font-semibold text-white shadow-lg ${hasArrived ? 'bg-emerald-600/95' : 'bg-amber-500/95'}`}
-          role="status"
-          aria-live="polite"
-        >
-          {hasArrived ? 'package has arrived' : 'package is nearby'}{distanceText ? ` — ${distanceText}` : ''}
-        </div>
-      )}
-      {/* Removed interpolation-based remaining/ETA panel (SSE removed) */}
     </div>
   )
 }

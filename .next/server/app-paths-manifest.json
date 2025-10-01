@@ -1,4 +1,6 @@
 {
+  "/api/webhook/courier/route": "app/api/webhook/courier/route.js",
   "/_not-found/page": "app/_not-found/page.js",
-  "/page": "app/page.js"
+  "/page": "app/page.js",
+  "/dev/sim/page": "app/dev/sim/page.js"
 }

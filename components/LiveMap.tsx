@@ -13,10 +13,13 @@ type Props = {
 }
 
 export default function LiveMap({ center, path, recipient }: Props) {
-  // WebSocket-provided live position & possible dynamic recipient (external source)
-  const { wsPos, recipient: dynamicRecipient } = useCourierWS()
+  // WebSocket-provided positions: courier + dynamic nodes
+  const { wsPos, recipient: dynamicRecipient, pickup, sortation: dynSortation, delivery } = useCourierWS()
   const effectiveRecipient = dynamicRecipient ? { lat: dynamicRecipient.lat, lng: dynamicRecipient.lng } : recipient
-  const courier = wsPos ? { lat: wsPos.lat, lng: wsPos.lng } : path[0]
+  const effectivePickup = pickup ? { lat: pickup.lat, lng: pickup.lng } : path[0]
+  const effectiveSortation = dynSortation ? { lat: dynSortation.lat, lng: dynSortation.lng } : (path.length >= 2 ? path[1] : undefined)
+  const effectiveDeliveryHub = delivery ? { lat: delivery.lat, lng: delivery.lng } : (path.length >= 3 ? path[2] : undefined)
+  const courier = wsPos ? { lat: wsPos.lat, lng: wsPos.lng } : effectivePickup
 
   const { isNearby, hasArrived, distanceMeters } = useMemo(() => {
     if (!courier || !effectiveRecipient) return { isNearby: false, hasArrived: false, distanceMeters: Infinity }
@@ -105,15 +108,19 @@ export default function LiveMap({ center, path, recipient }: Props) {
     </svg>
   )
 
-  // Treat provided path indices as logical waypoints: origin -> sortation -> hub -> recipient
-  const origin = path[0]
-  const sortation = path.length >= 2 ? path[1] : undefined
-  const hub = path.length >= 3 ? path[2] : undefined
-  // recipient already provided as final destination
+  // Logical waypoints now come from dynamic feed (fallback to provided path): pickup -> sortation -> delivery hub -> recipient
+  const origin = effectivePickup
+  const sortation = effectiveSortation
+  const hub = effectiveDeliveryHub
 
   // Build a breadcrumb polyline from actual received positions (WS) to visualize traveled path.
   const [breadcrumbs, setBreadcrumbs] = useState<LatLng[]>(() => [origin])
   const lastAddedRef = useRef<LatLng>(origin)
+  // If the origin changes dynamically (first pickup update arrives), reset breadcrumbs
+  useEffect(() => {
+    setBreadcrumbs([origin])
+    lastAddedRef.current = origin
+  }, [origin.lat, origin.lng])
   useEffect(() => {
     if (!courier) return
     const last = lastAddedRef.current
@@ -150,7 +157,7 @@ export default function LiveMap({ center, path, recipient }: Props) {
     if (isAtHub) return 'hub'
     if (isAtSortation) return 'sortation'
     // Approximate position along path by nearest waypoint index
-    const ordered = [origin, sortation, hub, effectiveRecipient].filter(Boolean) as LatLng[]
+  const ordered = [origin, sortation, hub, effectiveRecipient].filter(Boolean) as LatLng[]
     let nearestIdx = 0
     let nearestDist = Infinity
     ordered.forEach((pt, idx) => {

@@ -23,14 +23,14 @@ export default function ParcelCard({ parcel }: { parcel: Parcel }) {
       <section className="rounded-xl bg-card/70 ring-1 ring-white/10 p-2 md:p-4">
         <div className="relative h-64 md:h-96 w-full overflow-hidden rounded-lg">
           <LiveMap
-            center={{ lat: 40.4168, lng: -3.7038 }}
+            center={{ lat: 14.6000, lng: 121.0000 }}
             path={[
-              { lat: 40.405, lng: -3.72 },
-              { lat: 40.41, lng: -3.71 },
-              { lat: 40.42, lng: -3.70 },
-              { lat: 40.44, lng: -3.69 },
+              { lat: 14.605, lng: 121.005 },
+              { lat: 14.610, lng: 121.010 },
+              { lat: 14.615, lng: 121.015 },
+              { lat: 14.620, lng: 121.020 },
             ]}
-            recipient={{ lat: 40.44, lng: -3.69 }}
+            recipient={{ lat: 14.620, lng: 121.020 }}
           />
         </div>
       </section>

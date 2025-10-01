@@ -139,66 +139,45 @@ export default function LiveMap({ center, path, recipient }: Props) {
       : `${Math.round(distanceMeters)} m away`
   }, [distanceMeters])
 
-  // Waypoint arrival detection & stage-based status (heuristic without SSE leg timeline)
-  const waypointHitRadius = 30 // meters
-  const isAtSortation = useMemo(() => {
-    if (!courier || !sortation) return false
-    return haversine(courier, sortation) <= waypointHitRadius
-  }, [courier, sortation])
-  const isAtHub = useMemo(() => {
-    if (!courier || !hub) return false
-    return haversine(courier, hub) <= waypointHitRadius
-  }, [courier, hub])
-
-  type Stage = 'to-sortation' | 'sortation' | 'to-hub' | 'hub' | 'to-recipient' | 'recipient'
-  const stage: Stage = useMemo(() => {
-    if (!courier) return 'to-sortation'
-    if (hasArrived) return 'recipient'
-    if (isAtHub) return 'hub'
-    if (isAtSortation) return 'sortation'
-    // Approximate position along path by nearest waypoint index
-  const ordered = [origin, sortation, hub, effectiveRecipient].filter(Boolean) as LatLng[]
-    let nearestIdx = 0
-    let nearestDist = Infinity
-    ordered.forEach((pt, idx) => {
-      const d = haversine(courier, pt)
-      if (d < nearestDist) {
-        nearestDist = d
-        nearestIdx = idx
-      }
-    })
-    // Map nearest index to transitional stages
-    if (nearestIdx === 0 && sortation) return 'to-sortation'
-    if (nearestIdx === 1 && hub) return 'to-hub'
-    if (nearestIdx === 2 && effectiveRecipient) return 'to-recipient'
-    return 'to-recipient'
-  }, [courier, hasArrived, isAtHub, isAtSortation, origin, sortation, hub, effectiveRecipient])
+  // Waypoint arrival & status messaging (transition-based)
+  const waypointHitRadius = 30 // meters threshold
+  const isAtPickup = useMemo(() => haversine(courier, origin) <= waypointHitRadius, [courier, origin])
+  const isAtSortation = useMemo(() => sortation ? haversine(courier, sortation) <= waypointHitRadius : false, [courier, sortation])
+  const isAtHub = useMemo(() => hub ? haversine(courier, hub) <= waypointHitRadius : false, [courier, hub])
 
   const [legMsg, setLegMsg] = useState<string | null>(null)
   const [legIcon, setLegIcon] = useState<'warehouse' | 'truck' | 'person' | null>(null)
-  const prevStageRef = useRef<Stage | null>(null)
+  const prevFlagsRef = useRef({ atPickup: false, atSortation: false, atHub: false, arrived: false })
+
   useEffect(() => {
-    const prev = prevStageRef.current
-    if (prev !== stage) {
-      if (stage === 'sortation') {
-        setLegMsg('Parcel received at sortation center')
-        setLegIcon('warehouse')
-      } else if (prev === 'to-hub' && stage === 'hub') {
-        setLegMsg('Arrived at delivery hub')
-        setLegIcon('truck')
-      } else if (prev === 'to-sortation' && stage === 'to-hub') {
-        setLegMsg('On the way to Delivery Hub')
-        setLegIcon('truck')
-      } else if (prev === 'to-hub' && stage === 'to-recipient') {
-        setLegMsg('Out for delivery')
-        setLegIcon('truck')
-      } else if (stage === 'recipient') {
-        setLegMsg('Arriving now')
-        setLegIcon('person')
-      }
-      prevStageRef.current = stage
+    const prev = prevFlagsRef.current
+    // Initial pickup announcement (only once when we get a dynamic pickup different from default)
+    if (isAtPickup && !prev.atPickup) {
+      setLegMsg('Picked up – parcel in transit')
+      setLegIcon('truck')
     }
-  }, [stage])
+    if (isAtSortation && !prev.atSortation) {
+      setLegMsg('Parcel received at sortation center')
+      setLegIcon('warehouse')
+    }
+    if (!isAtSortation && prev.atSortation && !isAtHub && !hasArrived) {
+      setLegMsg('On the way to Delivery Hub')
+      setLegIcon('truck')
+    }
+    if (isAtHub && !prev.atHub) {
+      setLegMsg('Arrived at delivery hub')
+      setLegIcon('truck')
+    }
+    if (!isAtHub && prev.atHub && !hasArrived) {
+      setLegMsg('Out for delivery')
+      setLegIcon('truck')
+    }
+    if (hasArrived && !prev.arrived) {
+      setLegMsg('Arriving now')
+      setLegIcon('person')
+    }
+    prevFlagsRef.current = { atPickup: isAtPickup, atSortation: isAtSortation, atHub: isAtHub, arrived: hasArrived }
+  }, [isAtPickup, isAtSortation, isAtHub, hasArrived])
 
   return (
     <div className="relative h-full w-full">
